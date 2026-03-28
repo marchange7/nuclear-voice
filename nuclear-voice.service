@@ -1,0 +1,15 @@
+[Unit]
+Description=Nuclear Voice — STT/TTS/VAD for the Fortress
+After=network.target
+
+[Service]
+User=crew
+WorkingDirectory=/home/crew/git/nuclear-voice
+ExecStart=/home/crew/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8765
+Restart=on-failure
+RestartSec=5s
+Environment=VOICE_STT_MODEL=small
+Environment=VOICE_LANGUAGE=fr
+
+[Install]
+WantedBy=multi-user.target
