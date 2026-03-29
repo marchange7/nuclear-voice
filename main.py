@@ -185,7 +185,12 @@ def _do_speak(text: str, emotion: str, language: str) -> dict:
     sr = 22050
     t0 = time.monotonic()
 
-    if backend == "voxtral":
+    if backend == "kokoro":
+        lang_map = {"fr": "fr-fr", "en": "en-us", "fr-fr": "fr-fr", "en-us": "en-us"}
+        lang = lang_map.get(language[:5] if language else "fr", "fr-fr")
+        audio_array, sr = engine.create(text, voice=KOKORO_VOICE, speed=1.0, lang=lang)
+
+    elif backend == "voxtral":
         result = engine(text)
         audio_array = np.array(result["audio"], dtype=np.float32).squeeze()
         sr = result.get("sampling_rate", 22050)
