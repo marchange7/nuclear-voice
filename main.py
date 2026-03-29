@@ -29,7 +29,8 @@ except FileNotFoundError:
     log.warning("crew_voices.json not found — crew voice routing disabled")
 
 def _resolve_crew_voice(crew_name: str | None, default_voice: str, default_lang: str, default_speed: float):
-    """Look up voice/lang/speed for a crew member name. Falls back to defaults."""    if not crew_name:
+    """Look up voice/lang/speed for a crew member name. Falls back to defaults."""
+    if not crew_name:
         return default_voice, default_lang, default_speed
     profile = _CREW_VOICES.get(crew_name.lower().replace("è", "e").replace("ê", "e"))
     if not profile:
