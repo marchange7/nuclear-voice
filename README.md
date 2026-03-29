@@ -15,7 +15,7 @@ Shared STT / TTS / VAD microservice for the **Nuclear Fortress** ecosystem.
 cd ~/git/nuclear-voice
 bash download_models.sh          # one-time model pull
 sudo systemctl start nuclear-voice
-curl http://localhost:8765/health
+curl http://localhost:8083/health
 ```
 
 ## Emotions (TTS)
