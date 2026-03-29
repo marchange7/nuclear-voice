@@ -29,3 +29,9 @@ EOF
 echo ""
 echo "✅  All models downloaded. You can now start the service:"
 echo "    sudo systemctl start nuclear-voice"
+
+echo '==> Downloading Kokoro ONNX TTS models...'
+mkdir -p /data/models/kokoro
+wget -q --show-progress   -O /data/models/kokoro/kokoro-v1.0.int8.onnx   'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx'
+wget -q --show-progress   -O /data/models/kokoro/voices-v1.0.bin   'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin'
+echo '  Kokoro models cached at /data/models/kokoro/'

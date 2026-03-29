@@ -24,7 +24,12 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 _whisper_model = None
 _tts_engine = None
-_tts_backend = None  # "voxtral" | "pyttsx3" | "espeak"
+_tts_backend = None  # "kokoro" | "voxtral" | "pyttsx3" | "espeak"
+
+# Kokoro ONNX — paths configurable per machine (b450: /data/models, M4: ~/models)
+KOKORO_MODEL  = os.environ.get("KOKORO_MODEL",  "/data/models/kokoro/kokoro-v1.0.int8.onnx")
+KOKORO_VOICES = os.environ.get("KOKORO_VOICES", "/data/models/kokoro/voices-v1.0.bin")
+KOKORO_VOICE  = os.environ.get("KOKORO_VOICE",  "ff_siwis")  # fr female; bf_emma = EN female"
 _vad_model = None
 _vad_backend = None  # "silero" | "webrtcvad"
 
@@ -49,7 +54,21 @@ def _load_tts():
     if _tts_engine is not None:
         return _tts_engine, _tts_backend
 
-    # Try Voxtral first
+    # 1. Kokoro ONNX — fast, high quality, works on CPU (b450) and Apple Silicon (M4)
+    try:
+        if os.path.exists(KOKORO_MODEL) and os.path.exists(KOKORO_VOICES):
+            from kokoro_onnx import Kokoro
+            log.info("Loading Kokoro ONNX TTS: %s", KOKORO_MODEL)
+            _tts_engine = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+            _tts_backend = "kokoro"
+            log.info("Kokoro TTS ready (voice=%s)", KOKORO_VOICE)
+            return _tts_engine, _tts_backend
+        else:
+            log.warning("Kokoro models not found at %s — run download_models.sh", KOKORO_MODEL)
+    except Exception as e:
+        log.warning("Kokoro unavailable (%s), trying Voxtral…", e)
+
+    # 2. Voxtral
     try:
         from transformers import pipeline as hf_pipeline
         log.info("Loading Voxtral-4B TTS…")
