@@ -1,0 +1,14 @@
+{
+  "_comment": "Crew member voice assignments — Kokoro ONNX voice IDs",
+  "_doc": "Each crew member has a unique voice profile. 'lang' controls pronunciation.",
+  "emile":     { "voice": "ff_siwis",    "lang": "fr-fr", "speed": 1.0,  "note": "French, warm companion" },
+  "vigil":     { "voice": "bm_george",   "lang": "en-gb", "speed": 0.95, "note": "British, authoritative watchkeeper" },
+  "vaillant":  { "voice": "am_adam",     "lang": "en-us", "speed": 1.05, "note": "American, bold and decisive" },
+  "ardent":    { "voice": "af_heart",    "lang": "en-us", "speed": 1.1,  "note": "American female, warm and passionate" },
+  "racine":    { "voice": "bm_lewis",    "lang": "en-gb", "speed": 0.9,  "note": "British, grounded and steady" },
+  "lumiere":   { "voice": "bf_isabella", "lang": "en-gb", "speed": 0.95, "note": "British female, thoughtful" },
+  "conscience": { "voice": "af_bella",   "lang": "en-us", "speed": 0.9,  "note": "American female, gentle, ethical" },
+  "seve":      { "voice": "af_nova",     "lang": "en-us", "speed": 1.05, "note": "American female, vital and energetic" },
+  "vera":      { "voice": "bf_emma",     "lang": "en-gb", "speed": 1.0,  "note": "British female, clear and decisive" },
+  "aube":      { "voice": "bf_alice",    "lang": "en-gb", "speed": 0.9,  "note": "British female, welcoming, dawn energy" }
+}

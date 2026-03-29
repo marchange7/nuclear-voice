@@ -16,6 +16,27 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nuclear-voice")
+import json as _json
+
+# ── Crew voice profiles ────────────────────────────────────────────────────────
+_CREW_VOICES_PATH = os.path.join(os.path.dirname(__file__), "crew_voices.json")
+_CREW_VOICES: dict = {}
+try:
+    with open(_CREW_VOICES_PATH) as _f:
+        _CREW_VOICES = _json.load(_f)
+    log.info("Crew voices loaded: %d members", len([k for k in _CREW_VOICES if not k.startswith("_")]))
+except FileNotFoundError:
+    log.warning("crew_voices.json not found — crew voice routing disabled")
+
+def _resolve_crew_voice(crew_name: str | None, default_voice: str, default_lang: str, default_speed: float):
+    """Look up voice/lang/speed for a crew member name. Falls back to defaults."""    if not crew_name:
+        return default_voice, default_lang, default_speed
+    profile = _CREW_VOICES.get(crew_name.lower().replace("è", "e").replace("ê", "e"))
+    if not profile:
+        return default_voice, default_lang, default_speed
+    return profile.get("voice", default_voice), profile.get("lang", default_lang), profile.get("speed", default_speed)
+
+
 
 app = FastAPI(title="nuclear-voice", version="0.1.0")
 executor = ThreadPoolExecutor(max_workers=4)
@@ -180,15 +201,16 @@ _EMOTION_RATE = {
 }
 
 
-def _do_speak(text: str, emotion: str, language: str) -> dict:
+def _do_speak(text: str, emotion: str, language: str, crew: str | None = None) -> dict:
     engine, backend = _load_tts()
     sr = 22050
     t0 = time.monotonic()
 
     if backend == "kokoro":
-        lang_map = {"fr": "fr-fr", "en": "en-us", "fr-fr": "fr-fr", "en-us": "en-us"}
-        lang = lang_map.get(language[:5] if language else "fr", "fr-fr")
-        audio_array, sr = engine.create(text, voice=KOKORO_VOICE, speed=1.0, lang=lang)
+        lang_map = {"fr": "fr-fr", "en": "en-us", "fr-fr": "fr-fr", "en-us": "en-us", "en-gb": "en-gb"}
+        default_lang = lang_map.get(language[:5] if language else "fr", "fr-fr")
+        voice, lang, speed = _resolve_crew_voice(crew, KOKORO_VOICE, default_lang, 1.0)
+        audio_array, sr = engine.create(text, voice=voice, speed=speed, lang=lang)
 
     elif backend == "voxtral":
         result = engine(text)
@@ -280,6 +302,7 @@ class SpeakRequest(BaseModel):
     text: str
     emotion: str = "warm"
     language: str = "fr"
+    crew: str | None = None  # crew member name -> routes to their voice profile
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -304,7 +327,7 @@ async def speak(req: SpeakRequest):
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
-            executor, _do_speak, req.text, req.emotion, req.language
+            executor, _do_speak, req.text, req.emotion, req.language, req.crew
         )
     except Exception as e:
         log.exception("TTS failed")
