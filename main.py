@@ -181,6 +181,88 @@ _EMOTION_SPEED = {
 }
 
 
+# ── Phoneme helpers ───────────────────────────────────────────────────────────
+
+# Grapheme → phoneme label (maps to Oculus viseme names in the renderer).
+# French + English digraphs first (order matters — longest match wins).
+_GRAPHEME_RULES: list[tuple[str, str]] = [
+    ("eau", "o"), ("ou", "u"), ("au", "o"), ("ai", "e"), ("ei", "e"),
+    ("oi", "o"), ("eu", "u"), ("ch", "sh"), ("gn", "n"), ("qu", "k"),
+    ("ph", "f"), ("th", "th"), ("sh", "sh"), ("oo", "u"), ("ee", "i"),
+    ("ea", "i"), ("oa", "o"), ("ng", "n"), ("ck", "k"), ("wh", "f"),
+    ("b", "b"), ("c", "k"), ("d", "d"), ("f", "f"), ("g", "g"),
+    ("h", "sil"), ("j", "j"), ("k", "k"), ("l", "l"), ("m", "m"),
+    ("n", "n"), ("p", "p"), ("q", "k"), ("r", "r"), ("s", "s"),
+    ("t", "t"), ("v", "v"), ("w", "u"), ("x", "k"), ("y", "i"), ("z", "z"),
+    ("a", "aa"), ("e", "e"), ("i", "i"), ("o", "o"), ("u", "u"),
+]
+# Phoneme → Oculus viseme name
+_PHONEME_TO_VISEME: dict[str, str] = {
+    "sil": "viseme_sil",
+    "p": "viseme_PP", "b": "viseme_PP", "m": "viseme_PP",
+    "f": "viseme_FF", "v": "viseme_FF",
+    "th": "viseme_TH",
+    "d": "viseme_DD", "t": "viseme_DD", "n": "viseme_nn",
+    "k": "viseme_kk", "g": "viseme_kk",
+    "ch": "viseme_CH", "j": "viseme_CH", "sh": "viseme_CH",
+    "s": "viseme_SS", "z": "viseme_SS",
+    "r": "viseme_RR", "l": "viseme_RR",
+    "aa": "viseme_aa", "a": "viseme_aa", "e": "viseme_E",
+    "i": "viseme_I", "o": "viseme_O", "u": "viseme_U",
+}
+_PH_DURATION_MS = 80
+_WORD_GAP_MS = 40
+
+
+def _text_to_phoneme_timeline(text: str, audio_duration_ms: float) -> list[dict]:
+    """
+    Convert text to a timed phoneme/viseme sequence scaled to actual audio duration.
+
+    Returns list of:
+        {"phoneme": str, "viseme": str, "start_ms": int, "end_ms": int}
+
+    The timeline is derived via grapheme rules then linearly scaled so that
+    the last phoneme ends exactly at audio_duration_ms, giving the renderer
+    timing that stays in sync even when TTS speed varies.
+    """
+    import re
+    words = re.findall(r"[a-zàâäéèêëïîôùûüÿçœæ]+", text.lower())
+
+    raw: list[tuple[str, int, int]] = []  # (phoneme, start_ms, end_ms)
+    cursor = 0
+    for word in words:
+        i = 0
+        while i < len(word):
+            for pattern, phoneme in _GRAPHEME_RULES:
+                plen = len(pattern)
+                if word[i:i + plen] == pattern:
+                    if phoneme != "sil":
+                        raw.append((phoneme, cursor, cursor + _PH_DURATION_MS))
+                        cursor += _PH_DURATION_MS
+                    i += plen
+                    break
+            else:
+                i += 1
+        cursor += _WORD_GAP_MS
+
+    if not raw:
+        return []
+
+    # Scale to actual audio duration
+    raw_total = raw[-1][2]  # end_ms of last phoneme
+    scale = audio_duration_ms / raw_total if raw_total > 0 else 1.0
+
+    return [
+        {
+            "phoneme": ph,
+            "viseme": _PHONEME_TO_VISEME.get(ph, "viseme_sil"),
+            "start_ms": int(start * scale),
+            "end_ms": int(end * scale),
+        }
+        for ph, start, end in raw
+    ]
+
+
 def _do_speak(text: str, emotion: str, language: str) -> dict:
     engine, backend = _load_tts()
     sr = 22050
@@ -228,7 +310,16 @@ def _do_speak(text: str, emotion: str, language: str) -> dict:
 
     duration_ms = int((time.monotonic() - t0) * 1000)
     audio_b64 = _numpy_to_b64(audio_array, sr)
-    return {"audio_b64": audio_b64, "format": "wav", "duration_ms": duration_ms}
+    # Compute audio duration from samples (more accurate than wall-clock)
+    audio_duration_ms = int(len(audio_array) / sr * 1000)
+    phonemes = _text_to_phoneme_timeline(text, audio_duration_ms)
+    return {
+        "audio_b64": audio_b64,
+        "format": "wav",
+        "duration_ms": duration_ms,
+        "audio_duration_ms": audio_duration_ms,
+        "phonemes": phonemes,
+    }
 
 
 def _do_vad(audio_b64: str) -> dict:
