@@ -263,7 +263,7 @@ def _text_to_phoneme_timeline(text: str, audio_duration_ms: float) -> list[dict]
     ]
 
 
-def _do_speak(text: str, emotion: str, language: str) -> dict:
+def _do_speak(text: str, emotion: str, language: str, voice_id: Optional[str] = None) -> dict:
     engine, backend = _load_tts()
     sr = 22050
     t0 = time.monotonic()
@@ -274,7 +274,8 @@ def _do_speak(text: str, emotion: str, language: str) -> dict:
         # Kokoro lang codes: "en-us", "fr-fr", etc. — map 2-letter to Kokoro format
         _KOKORO_LANG = {"fr": "fr-fr", "en": "en-us", "de": "de-de", "es": "es-es"}
         kokoro_lang = _KOKORO_LANG.get(lang_code, f"{lang_code}-{lang_code}")
-        samples, sr = engine.create(text, voice=KOKORO_VOICE, speed=speed, lang=kokoro_lang)
+        voice = voice_id or KOKORO_VOICE
+        samples, sr = engine.create(text, voice=voice, speed=speed, lang=kokoro_lang)
         audio_array = np.array(samples, dtype=np.float32)
 
     elif backend == "voxtral":
@@ -435,6 +436,7 @@ class SpeakRequest(BaseModel):
     text: str
     emotion: str = "warm"
     language: str = "fr"
+    voice_id: Optional[str] = None  # Kokoro voice ID; falls back to KOKORO_VOICE env default
 
 
 class ConversationRequest(BaseModel):
@@ -465,7 +467,7 @@ async def speak(req: SpeakRequest):
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
-            executor, _do_speak, req.text, req.emotion, req.language
+            executor, _do_speak, req.text, req.emotion, req.language, req.voice_id
         )
     except Exception as e:
         log.exception("TTS failed")
