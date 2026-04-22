@@ -16,28 +16,6 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nuclear-voice")
-import json as _json
-
-# ── Crew voice profiles ────────────────────────────────────────────────────────
-_CREW_VOICES_PATH = os.path.join(os.path.dirname(__file__), "crew_voices.json")
-_CREW_VOICES: dict = {}
-try:
-    with open(_CREW_VOICES_PATH) as _f:
-        _CREW_VOICES = _json.load(_f)
-    log.info("Crew voices loaded: %d members", len([k for k in _CREW_VOICES if not k.startswith("_")]))
-except FileNotFoundError:
-    log.warning("crew_voices.json not found — crew voice routing disabled")
-
-def _resolve_crew_voice(crew_name: str | None, default_voice: str, default_lang: str, default_speed: float):
-    """Look up voice/lang/speed for a crew member name. Falls back to defaults."""
-    if not crew_name:
-        return default_voice, default_lang, default_speed
-    profile = _CREW_VOICES.get(crew_name.lower().replace("è", "e").replace("ê", "e"))
-    if not profile:
-        return default_voice, default_lang, default_speed
-    return profile.get("voice", default_voice), profile.get("lang", default_lang), profile.get("speed", default_speed)
-
-
 
 app = FastAPI(title="nuclear-voice", version="0.1.0")
 executor = ThreadPoolExecutor(max_workers=4)
@@ -48,15 +26,19 @@ _whisper_model = None
 _tts_engine = None
 _tts_backend = None  # "kokoro" | "voxtral" | "pyttsx3" | "espeak"
 
-# Kokoro ONNX — paths configurable per machine (b450: /data/models, M4: ~/models)
-KOKORO_MODEL  = os.environ.get("KOKORO_MODEL",  "/data/models/kokoro/kokoro-v1.0.int8.onnx")
+# Kokoro ONNX paths — override via env vars on each machine (b450 or M4)
+KOKORO_MODEL = os.environ.get("KOKORO_MODEL", "/data/models/kokoro/kokoro-v1.9.onnx")
 KOKORO_VOICES = os.environ.get("KOKORO_VOICES", "/data/models/kokoro/voices-v1.0.bin")
-KOKORO_VOICE  = os.environ.get("KOKORO_VOICE",  "ff_siwis")  # fr female; bf_emma = EN female"
+KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "ff_siwis")  # French female — change to bf_emma for EN
 _vad_model = None
 _vad_backend = None  # "silero" | "webrtcvad"
 
 STT_MODEL = os.environ.get("VOICE_STT_MODEL", "small")
 VOICE_LANGUAGE = os.environ.get("VOICE_LANGUAGE", "fr")
+
+# ── Conversational pipeline config ─────────────────────────────────────────────
+FORTRESS_URL = os.environ.get("FORTRESS_URL", "http://192.168.2.23:7700")
+CONVERSE_AGENT = os.environ.get("CONVERSE_AGENT", "emile")  # agent to route conversation to
 
 
 # ── Model loaders ──────────────────────────────────────────────────────────────
@@ -76,21 +58,21 @@ def _load_tts():
     if _tts_engine is not None:
         return _tts_engine, _tts_backend
 
-    # 1. Kokoro ONNX — fast, high quality, works on CPU (b450) and Apple Silicon (M4)
-    try:
-        if os.path.exists(KOKORO_MODEL) and os.path.exists(KOKORO_VOICES):
+    # Primary: Kokoro ONNX (82M params, CPU-efficient)
+    if os.path.exists(KOKORO_MODEL) and os.path.exists(KOKORO_VOICES):
+        try:
             from kokoro_onnx import Kokoro
             log.info("Loading Kokoro ONNX TTS: %s", KOKORO_MODEL)
             _tts_engine = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
             _tts_backend = "kokoro"
             log.info("Kokoro TTS ready (voice=%s)", KOKORO_VOICE)
             return _tts_engine, _tts_backend
-        else:
-            log.warning("Kokoro models not found at %s — run download_models.sh", KOKORO_MODEL)
-    except Exception as e:
-        log.warning("Kokoro unavailable (%s), trying Voxtral…", e)
+        except Exception as e:
+            log.warning("Kokoro unavailable (%s), trying Voxtral…", e)
+    else:
+        log.warning("Kokoro model files not found (%s / %s), trying Voxtral…", KOKORO_MODEL, KOKORO_VOICES)
 
-    # 2. Voxtral
+    # Fallback: Voxtral (4B params)
     try:
         from transformers import pipeline as hf_pipeline
         log.info("Loading Voxtral-4B TTS…")
@@ -103,18 +85,7 @@ def _load_tts():
         log.info("Voxtral TTS ready")
         return _tts_engine, _tts_backend
     except Exception as e:
-        log.warning("Voxtral unavailable (%s), trying pyttsx3…", e)
-
-    # Fallback: pyttsx3
-    try:
-        import pyttsx3
-        engine = pyttsx3.init()
-        _tts_engine = engine
-        _tts_backend = "pyttsx3"
-        log.info("pyttsx3 TTS ready")
-        return _tts_engine, _tts_backend
-    except Exception as e:
-        log.warning("pyttsx3 unavailable (%s), using espeak…", e)
+        log.warning("Voxtral unavailable (%s), using espeak…", e)
 
     # Fallback: espeak via subprocess
     _tts_engine = "espeak"
@@ -201,17 +172,111 @@ _EMOTION_RATE = {
     "impulsive": 200,
 }
 
+# Emotion → Kokoro speed multiplier (1.0 = normal, range ~0.5–2.0)
+_EMOTION_SPEED = {
+    "warm": 1.0,
+    "decisive": 1.15,
+    "uncertain": 0.85,
+    "impulsive": 1.3,
+}
 
-def _do_speak(text: str, emotion: str, language: str, crew: str | None = None) -> dict:
+
+# ── Phoneme helpers ───────────────────────────────────────────────────────────
+
+# Grapheme → phoneme label (maps to Oculus viseme names in the renderer).
+# French + English digraphs first (order matters — longest match wins).
+_GRAPHEME_RULES: list[tuple[str, str]] = [
+    ("eau", "o"), ("ou", "u"), ("au", "o"), ("ai", "e"), ("ei", "e"),
+    ("oi", "o"), ("eu", "u"), ("ch", "sh"), ("gn", "n"), ("qu", "k"),
+    ("ph", "f"), ("th", "th"), ("sh", "sh"), ("oo", "u"), ("ee", "i"),
+    ("ea", "i"), ("oa", "o"), ("ng", "n"), ("ck", "k"), ("wh", "f"),
+    ("b", "b"), ("c", "k"), ("d", "d"), ("f", "f"), ("g", "g"),
+    ("h", "sil"), ("j", "j"), ("k", "k"), ("l", "l"), ("m", "m"),
+    ("n", "n"), ("p", "p"), ("q", "k"), ("r", "r"), ("s", "s"),
+    ("t", "t"), ("v", "v"), ("w", "u"), ("x", "k"), ("y", "i"), ("z", "z"),
+    ("a", "aa"), ("e", "e"), ("i", "i"), ("o", "o"), ("u", "u"),
+]
+# Phoneme → Oculus viseme name
+_PHONEME_TO_VISEME: dict[str, str] = {
+    "sil": "viseme_sil",
+    "p": "viseme_PP", "b": "viseme_PP", "m": "viseme_PP",
+    "f": "viseme_FF", "v": "viseme_FF",
+    "th": "viseme_TH",
+    "d": "viseme_DD", "t": "viseme_DD", "n": "viseme_nn",
+    "k": "viseme_kk", "g": "viseme_kk",
+    "ch": "viseme_CH", "j": "viseme_CH", "sh": "viseme_CH",
+    "s": "viseme_SS", "z": "viseme_SS",
+    "r": "viseme_RR", "l": "viseme_RR",
+    "aa": "viseme_aa", "a": "viseme_aa", "e": "viseme_E",
+    "i": "viseme_I", "o": "viseme_O", "u": "viseme_U",
+}
+_PH_DURATION_MS = 80
+_WORD_GAP_MS = 40
+
+
+def _text_to_phoneme_timeline(text: str, audio_duration_ms: float) -> list[dict]:
+    """
+    Convert text to a timed phoneme/viseme sequence scaled to actual audio duration.
+
+    Returns list of:
+        {"phoneme": str, "viseme": str, "start_ms": int, "end_ms": int}
+
+    The timeline is derived via grapheme rules then linearly scaled so that
+    the last phoneme ends exactly at audio_duration_ms, giving the renderer
+    timing that stays in sync even when TTS speed varies.
+    """
+    import re
+    words = re.findall(r"[a-zàâäéèêëïîôùûüÿçœæ]+", text.lower())
+
+    raw: list[tuple[str, int, int]] = []  # (phoneme, start_ms, end_ms)
+    cursor = 0
+    for word in words:
+        i = 0
+        while i < len(word):
+            for pattern, phoneme in _GRAPHEME_RULES:
+                plen = len(pattern)
+                if word[i:i + plen] == pattern:
+                    if phoneme != "sil":
+                        raw.append((phoneme, cursor, cursor + _PH_DURATION_MS))
+                        cursor += _PH_DURATION_MS
+                    i += plen
+                    break
+            else:
+                i += 1
+        cursor += _WORD_GAP_MS
+
+    if not raw:
+        return []
+
+    # Scale to actual audio duration
+    raw_total = raw[-1][2]  # end_ms of last phoneme
+    scale = audio_duration_ms / raw_total if raw_total > 0 else 1.0
+
+    return [
+        {
+            "phoneme": ph,
+            "viseme": _PHONEME_TO_VISEME.get(ph, "viseme_sil"),
+            "start_ms": int(start * scale),
+            "end_ms": int(end * scale),
+        }
+        for ph, start, end in raw
+    ]
+
+
+def _do_speak(text: str, emotion: str, language: str, voice_id: Optional[str] = None) -> dict:
     engine, backend = _load_tts()
     sr = 22050
     t0 = time.monotonic()
 
     if backend == "kokoro":
-        lang_map = {"fr": "fr-fr", "en": "en-us", "fr-fr": "fr-fr", "en-us": "en-us", "en-gb": "en-gb"}
-        default_lang = lang_map.get(language[:5] if language else "fr", "fr-fr")
-        voice, lang, speed = _resolve_crew_voice(crew, KOKORO_VOICE, default_lang, 1.0)
-        audio_array, sr = engine.create(text, voice=voice, speed=speed, lang=lang)
+        speed = _EMOTION_SPEED.get(emotion, 1.0)
+        lang_code = language[:2] if language else "fr"
+        # Kokoro lang codes: "en-us", "fr-fr", etc. — map 2-letter to Kokoro format
+        _KOKORO_LANG = {"fr": "fr-fr", "en": "en-us", "de": "de-de", "es": "es-es"}
+        kokoro_lang = _KOKORO_LANG.get(lang_code, f"{lang_code}-{lang_code}")
+        voice = voice_id or KOKORO_VOICE
+        samples, sr = engine.create(text, voice=voice, speed=speed, lang=kokoro_lang)
+        audio_array = np.array(samples, dtype=np.float32)
 
     elif backend == "voxtral":
         result = engine(text)
@@ -246,7 +311,16 @@ def _do_speak(text: str, emotion: str, language: str, crew: str | None = None) -
 
     duration_ms = int((time.monotonic() - t0) * 1000)
     audio_b64 = _numpy_to_b64(audio_array, sr)
-    return {"audio_b64": audio_b64, "format": "wav", "duration_ms": duration_ms}
+    # Compute audio duration from samples (more accurate than wall-clock)
+    audio_duration_ms = int(len(audio_array) / sr * 1000)
+    phonemes = _text_to_phoneme_timeline(text, audio_duration_ms)
+    return {
+        "audio_b64": audio_b64,
+        "format": "wav",
+        "duration_ms": duration_ms,
+        "audio_duration_ms": audio_duration_ms,
+        "phonemes": phonemes,
+    }
 
 
 def _do_vad(audio_b64: str) -> dict:
@@ -292,6 +366,65 @@ def _do_vad(audio_b64: str) -> dict:
     return {"is_speech": is_speech, "confidence": round(confidence, 4)}
 
 
+# ── Conversational round-trip worker ──────────────────────────────────────────
+
+def _do_converse(audio_b64: str, user_id: str, language: str) -> dict:
+    """VAD → STT → Fortress agent chat → TTS — full synchronous round-trip."""
+    import urllib.request
+    import json as _json
+
+    # 1. VAD: skip synthesis if no speech detected
+    vad = _do_vad(audio_b64)
+    if not vad["is_speech"]:
+        return {"is_speech": False, "transcript": "", "reply": "", "audio_b64": "", "emotion": "warm", "stt_duration_ms": 0}
+
+    # 2. STT
+    stt = _do_transcribe(audio_b64, language)
+    transcript = stt["text"].strip()
+    if not transcript:
+        return {"is_speech": True, "transcript": "", "reply": "", "audio_b64": "", "emotion": "warm", "stt_duration_ms": stt["duration_ms"]}
+
+    # 3. Fortress agent chat
+    chat_url = f"{FORTRESS_URL}/v1/agents/{CONVERSE_AGENT}/chat"
+    payload_bytes = _json.dumps({"message": transcript, "user_id": user_id, "language": language}).encode()
+    req = urllib.request.Request(
+        chat_url,
+        data=payload_bytes,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    reply = ""
+    emotion = "warm"
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+        reply = data.get("reply") or data.get("text") or data.get("message", "")
+        emotion = data.get("emotion", "warm")
+        # Validate emotion value — fall back to warm if unknown
+        if emotion not in ("warm", "decisive", "uncertain", "impulsive"):
+            emotion = "warm"
+    except Exception as e:
+        log.warning("Fortress chat call failed (%s): %s", CONVERSE_AGENT, e)
+
+    # 4. TTS
+    reply_audio = ""
+    if reply:
+        try:
+            tts = _do_speak(reply, emotion, language)
+            reply_audio = tts["audio_b64"]
+        except Exception as e:
+            log.warning("TTS failed for converse reply: %s", e)
+
+    return {
+        "is_speech": True,
+        "transcript": transcript,
+        "reply": reply,
+        "audio_b64": reply_audio,
+        "emotion": emotion,
+        "stt_duration_ms": stt["duration_ms"],
+    }
+
+
 # ── Request / Response schemas ─────────────────────────────────────────────────
 
 class TranscribeRequest(BaseModel):
@@ -303,7 +436,13 @@ class SpeakRequest(BaseModel):
     text: str
     emotion: str = "warm"
     language: str = "fr"
-    crew: str | None = None  # crew member name -> routes to their voice profile
+    voice_id: Optional[str] = None  # Kokoro voice ID; falls back to KOKORO_VOICE env default
+
+
+class ConversationRequest(BaseModel):
+    audio_b64: str
+    user_id: str = "user"
+    language: str = "fr"
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -328,7 +467,7 @@ async def speak(req: SpeakRequest):
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
-            executor, _do_speak, req.text, req.emotion, req.language, req.crew
+            executor, _do_speak, req.text, req.emotion, req.language, req.voice_id
         )
     except Exception as e:
         log.exception("TTS failed")
@@ -343,6 +482,29 @@ async def vad(audio_b64: str = Query(...)):
         result = await loop.run_in_executor(executor, _do_vad, audio_b64)
     except Exception as e:
         log.exception("VAD failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return result
+
+
+@app.post("/converse")
+async def converse(req: ConversationRequest):
+    """Full conversational round-trip: audio → VAD → STT → agent → TTS → audio.
+
+    Returns:
+      is_speech: bool — false if VAD detected no speech (audio_b64 will be empty)
+      transcript: str — what the user said
+      reply: str — agent text response
+      audio_b64: str — spoken reply as base64 WAV
+      emotion: str — TTS prosody used (warm/decisive/uncertain/impulsive)
+      stt_duration_ms: int
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            executor, _do_converse, req.audio_b64, req.user_id, req.language
+        )
+    except Exception as e:
+        log.exception("Conversation round-trip failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
     return result
 
