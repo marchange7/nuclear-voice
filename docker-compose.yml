@@ -1,0 +1,34 @@
+services:
+  sidecar:
+    build: ../nuclear-wrapper/sidecar
+    environment:
+      TARGET_URL: http://nuclear-voice:8083
+      SIDECAR_PORT: "8084"
+      SIDECAR_CMD: ""
+    ports:
+      - "127.0.0.1:8084:8084"
+    depends_on: [nuclear-voice]
+    restart: unless-stopped
+
+  nuclear-voice:
+    build: .
+    container_name: nuclear-voice
+    environment:
+      - VOICE_MODEL=${VOICE_MODEL:-kokoro}
+      - STT_MODEL=${STT_MODEL:-base}
+      - FORTRESS_URL=${FORTRESS_URL:-http://host.gateway.docker.internal:7700}
+      - CONVERSE_AGENT=${CONVERSE_AGENT:-emile}
+    ports:
+      - "127.0.0.1:8083:8083"
+    volumes:
+      - models:/root/.cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  models:

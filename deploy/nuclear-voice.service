@@ -1,0 +1,27 @@
+[Unit]
+Description=Nuclear Voice — STT/TTS/VAD + conversational /converse endpoint (port 8083)
+Documentation=https://github.com/marchange7/nuclear-voice
+After=network.target
+
+[Service]
+Type=simple
+User=crew
+Group=crew
+WorkingDirectory=/home/crew/git/nuclear-voice
+EnvironmentFile=-/home/crew/.config/nuclear-voice/env
+Environment=VOICE_MODEL=kokoro
+Environment=STT_MODEL=base
+Environment=FORTRESS_URL=http://192.168.2.23:7700
+Environment=CONVERSE_AGENT=emile
+# ALERT_LANG=fr  (fr|en|de|es — matches nuclear-eye ALERT_LANG)
+ExecStart=/home/crew/.venv/nuclear/bin/uvicorn main:app --host 127.0.0.1 --port 8083 --workers 1
+Restart=on-failure
+RestartSec=10s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# Allow time for model loading on first start
+TimeoutStartSec=120
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
