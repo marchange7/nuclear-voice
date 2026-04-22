@@ -14,6 +14,8 @@ import soundfile as sf
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
+import nuclear_client  # T-P1-12: process-wide HTTP session
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nuclear-voice")
 
@@ -37,7 +39,7 @@ STT_MODEL = os.environ.get("VOICE_STT_MODEL", "small")
 VOICE_LANGUAGE = os.environ.get("VOICE_LANGUAGE", "fr")
 
 # ── Conversational pipeline config ─────────────────────────────────────────────
-FORTRESS_URL = os.environ.get("FORTRESS_URL", "http://192.168.2.23:7700")
+# FORTRESS_URL moved to nuclear_client.py (T-P1-12)
 CONVERSE_AGENT = os.environ.get("CONVERSE_AGENT", "emile")  # agent to route conversation to
 
 
@@ -370,9 +372,6 @@ def _do_vad(audio_b64: str) -> dict:
 
 def _do_converse(audio_b64: str, user_id: str, language: str) -> dict:
     """VAD → STT → Fortress agent chat → TTS — full synchronous round-trip."""
-    import urllib.request
-    import json as _json
-
     # 1. VAD: skip synthesis if no speech detected
     vad = _do_vad(audio_b64)
     if not vad["is_speech"]:
@@ -384,25 +383,21 @@ def _do_converse(audio_b64: str, user_id: str, language: str) -> dict:
     if not transcript:
         return {"is_speech": True, "transcript": "", "reply": "", "audio_b64": "", "emotion": "warm", "stt_duration_ms": stt["duration_ms"]}
 
-    # 3. Fortress agent chat
-    chat_url = f"{FORTRESS_URL}/v1/agents/{CONVERSE_AGENT}/chat"
-    payload_bytes = _json.dumps({"message": transcript, "user_id": user_id, "language": language}).encode()
-    req = urllib.request.Request(
-        chat_url,
-        data=payload_bytes,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    # 3. Fortress agent chat — T-P1-12: routed through nuclear_client (aiohttp, chain-ready)
     reply = ""
     emotion = "warm"
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = _json.loads(resp.read())
-        reply = data.get("reply") or data.get("text") or data.get("message", "")
-        emotion = data.get("emotion", "warm")
-        # Validate emotion value — fall back to warm if unknown
-        if emotion not in ("warm", "decisive", "uncertain", "impulsive"):
-            emotion = "warm"
+        result = asyncio.get_event_loop().run_until_complete(
+            nuclear_client.fortress_chat(
+                agent=CONVERSE_AGENT,
+                message=transcript,
+                user_id=user_id,
+                language=language,
+                timeout=10.0,
+            )
+        )
+        reply   = result["reply"]
+        emotion = result["emotion"]
     except Exception as e:
         log.warning("Fortress chat call failed (%s): %s", CONVERSE_AGENT, e)
 
