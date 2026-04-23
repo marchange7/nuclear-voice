@@ -19,6 +19,24 @@ import nuclear_client  # T-P1-12: process-wide HTTP session
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nuclear-voice")
 
+# ── nuclear-wrapper fail-closed startup probe (T-P0-02) ──────────────────────
+_nw_url = os.getenv("NUCLEAR_WRAPPER_URL", "").strip()
+if _nw_url:
+    import urllib.request as _nw_urllib
+    _nw_ok = False
+    for _nw_delay in [1, 2, 4, 8, 8]:
+        try:
+            with _nw_urllib.urlopen(f"{_nw_url}/health", timeout=3) as _r:
+                if _r.status == 200:
+                    _nw_ok = True
+                    break
+        except Exception:
+            pass
+        time.sleep(_nw_delay)
+    if not _nw_ok:
+        log.error("[startup] nuclear-wrapper unreachable after 5 attempts — exiting (fail-closed)")
+        raise SystemExit(1)
+
 app = FastAPI(title="nuclear-voice", version="0.1.0")
 executor = ThreadPoolExecutor(max_workers=4)
 
