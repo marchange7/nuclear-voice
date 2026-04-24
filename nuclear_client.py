@@ -23,11 +23,9 @@ log = logging.getLogger("nuclear-voice.nuclear_client")
 
 FORTRESS_URL   = os.environ.get("FORTRESS_URL",        "http://192.168.2.23:7700")
 CHAIN_ENABLED  = os.environ.get("CHAIN_ENABLED",       "false").lower() == "true"
-# T-P2-06: NUCLEAR_CHAIN_TRANSPORT_URL is the preferred env var for the proxy path.
-# NUCLEAR_CHAIN_URL is the legacy fallback (deprecated for one release).
 CHAIN_URL      = (
     os.environ.get("NUCLEAR_CHAIN_TRANSPORT_URL", "").strip()
-    or os.environ.get("NUCLEAR_CHAIN_URL", "http://localhost:9100")
+    or "http://localhost:9100"
 )
 SERVICE_TOKEN  = os.environ.get("NUCLEAR_SERVICE_TOKEN", "")
 SERVICE_NAME   = os.environ.get("NUCLEAR_SERVICE_NAME",  "nuclear-voice")
